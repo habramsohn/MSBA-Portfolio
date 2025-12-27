@@ -1,6 +1,6 @@
 Welcome to my portfolio! Please direct inquiries to harrisonabramsohn@gmail.com
 
-Some projects require downloading an associated file from the Data folder. See descriptions below:
+See descriptions below:
 
 # Analytics
 
