@@ -1,4 +1,6 @@
-Welcome to my portfolio! Please direct inquiries to harrisonabramsohn@gmail.com
+Welcome to my portfolio! These projects were developed while I was pursuing a Master of Science in Business Analytics at the College of William & Mary. 
+
+Please direct inquiries to harrisonabramsohn@gmail.com
 
 See descriptions below:
 
