@@ -1,0 +1,54 @@
+```{r}
+#| message: false
+#| warning: false
+rm(list=ls())
+library(tidyverse)
+```
+
+Let's use simulation to find out the average return of investing in Bitcoins.
+
+We'll assume that the price of Bitcoin changes according to a formula describing Brownian motion. The price of Bitcoin is highly volatile. The starting price can be adjusted, but we default it to USD 50,000. This formula has the following parameters:
+
+Constant percentage drift: 40%
+Constant volatility: 100%
+
+Note that these parameters are assumed and not realistic.
+
+```{r}
+startingPrice <- 50000
+mu <- .40
+sigma <- 1
+sigmaSquared <- sigma ** 2
+dt <- 1/365
+
+returns <- (mu-0.5*sigmaSquared)
+```
+
+We'll simulate a year of price changes 1,000 times. Every simulation, we multiply the constant return factor by a constant volatility and a normally distributed random variable. We find the price of Bitcoin on the final day of each simulated year, then aggregate them to view the distribution of the results.
+
+```{r}
+nsim <- 1000
+days <- 365
+
+sim <- tibble(
+    sim_id = rep(1:nsim, each = days),
+    day = rep(1:days, times = nsim),
+    return = returns*dt+(sigma*sqrt(dt)*rnorm(days*nsim, 0, 1))) %>% 
+    group_by(sim_id) %>% 
+    mutate(price = startingPrice * exp(cumsum(return))) %>% 
+    filter(day == 365); sim
+
+sim_plot <- sim %>% 
+    ggplot(aes(price)) +
+        geom_histogram() +
+        labs(x="Ending Balance",
+             y="Count",
+             title="Distribution of Ending Balances",
+             subtitle="Bitcoin Investment"); sim_plot 
+
+sim_quants <- sim %>% 
+    pull(price) %>% 
+    quantile(); sim_quants
+```
+
+Although the potential payoff of investing in Bitcoin is massive, the potential losses are also high. Looking at the visual distribution, if each simulation is considered an investor, the vast majority of investors lost more than half the original investment.

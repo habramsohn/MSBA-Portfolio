@@ -1,0 +1,123 @@
+A car company is deciding whether or not to start selling an AI-driven vehicle. Every sold vehicle creates a profit of USD 10,000. However, an accident due to a software glitch in the sold vehicle's system would cost an estimated USD 100,000. The chances of any given AI-driven vehicle having the glitch is 5%.
+
+Should the car company start selling these vehicles?
+
+Let's find the expected value of selling one car.
+
+```{r}
+#| echo: false
+# Encoding values and probabilities
+cost <- -100000 # Cost of the glitch
+costProb <- 0.05 # Probability of having the glitch
+payoff <- 10000 # Profit per sold vehicle
+payoffProb <- 0.95 # Probability of a sold vehicle not having the glitch 
+
+# EMV for selling one vehicle
+EMV <- (payoff * payoffProb) + (cost * costProb)
+EMV # $4500
+```
+
+Visualize a decision tree summarizing the problem. Note that you will need to render this document using RStudio or a similar program to see this output:
+
+```{mermaid}
+graph LR
+
+A[ ] -->|Sell Car| B(( Probability of the Glitch ))
+B -->|Has glitch, p=.05| C( -$100,000 )
+B -->|No glitch, p=.95| D( $10,000 )
+C & D --> E( EMV = $4500 )
+A[ ] -->|No Sale| No_Sale( EMV = $0 )
+```
+
+The company has developed a test to determine the probability of a certain car having the glitch. The test costs $500 per car. A car without the glitch always tests negative. However, a car with the glitch has only a 90% chance of testing positive. In other words, the chance of a false negative is 10%. 
+
+How should this change the company's decision? Let's find the EMV for a single vehicle using Bayes Theorem. 
+
+```{r}
+#| include: false
+# Define needed terms for Total Probability calculation - probabilities
+glitch <- .05
+noGlitch <- .95
+negNoGlitch <- 1
+negGlitch <- .1
+posNoGlitch <- 0
+posGlitch <- .9
+
+# Calculate probability of positive and negative tests
+neg <- (negNoGlitch * noGlitch) + (negGlitch * glitch)
+# 95.5%
+pos <- (posNoGlitch * noGlitch) + (posGlitch * glitch)
+# 4.5%
+
+# Apply Bayes' Theorem to update probabilities
+noGlitchNeg <- (noGlitch * negNoGlitch) / ((noGlitch * negNoGlitch) + (glitch * negGlitch))
+# ~0.995
+glitchNeg <- 1 - noGlitchNeg
+# ~0.005
+noGlitchPos <- (noGlitch * posNoGlitch) / ((noGlitch * posNoGlitch) + (glitch * posGlitch));noGlitchPos
+# 0
+glitchPos <- 1 - noGlitchPos;glitchPos
+# 1
+
+# Find the EMVs for selling a vehicle after performing the test.
+posEMV <- ((noGlitchPos * payoff) + (glitchPos * cost)) - 500
+posEMV # -$100500
+# A vehicle with a positive test would not be sold, leaving only the cost of the test (-$500).
+posEMV <- -500
+negEMV <- ((noGlitchNeg * payoff) + (glitchNeg * cost)) - 500
+negEMV # $8924.08
+
+# Weight the best outcomes of both branches by the probability of receiving each test result.
+EMV <- (negEMV * neg) + (posEMV * pos)
+```
+```{r}
+#| echo: false
+EMV # 8500
+
+# The test is obviously worth the cost per vehicle, as it greatly reduces the chances of selling a faulty vehicle, essentially doubling the EMV per vehicle.
+```
+
+Let's find the value of the test - the maximum amount the company would be willing to pay for it. 
+
+```{r}
+#| echo: false
+# To calculate the test's value, add back the cost of the test to avoid undercounting.
+
+testEMV <- 8524.75 + 500
+noTestEMV <- 4500
+
+# Find the EVI for the test as given:
+EVI <- testEMV - noTestEMV
+EVI # $4524.75
+
+# This information is worth up to $4524.75 per vehicle, so a test costing $500 is a good deal.
+```
+
+Visualize a decision tree summarizing the problem. Note that you will need to render this document using RStudio or a similar program to see this output:
+
+```{mermaid}
+graph LR
+
+A[ Test? ] -->|Test| test(( Result, EVI = $4524.75 ))
+
+test -->|Positive, p=.045| testPos[ Admit? ]
+testPos -->|Admit| testPosAdmit(( Disease? ))
+testPosAdmit -->|Yes, p=1| testPosD( -$100,000 )
+testPosAdmit -->|No, p=0| testPosND( $10,000 )
+testPosD & testPosND -->|-$500| testPosAdmitEMV( EMV = -$100,500 )
+testPos -->|Don't Admit| testPosNoAdmit( EMV: -$500 )
+
+test -->|Negative, p=.955| testNeg[ Admit? ]
+testNeg --> |Admit| testNegAdmit(( Disease? ))
+testNegAdmit -->|Yes, p=.005| testNegD( -$100,000 )
+testNegAdmit -->|No, p=.995| testNegND( $10,000 )
+testNegD & testNegND -->|-$500| testNegAdmitEMV( EMV = $8950 )
+testNeg -->|Don't Admit| testNegNoAdmit( EMV: -$500 )
+
+A[ Test? ] -->|No Test| noTest[ Admit? ]
+noTest[ Admit? ] -->|Admit| noTestAdmit(( Disease? ))
+noTestAdmit -->|Yes, p=0.05| noTestD( -$100,000 )
+noTestAdmit -->|No, p=0.95| noTestND( $10,000 )
+noTestD & noTestND --> noTestAdmitEMV( EMV: $4500 )
+noTest[ Admit? ] -->|Don't Admit| noTestNoAdmitEMV( EMV: $0 ) 
+```

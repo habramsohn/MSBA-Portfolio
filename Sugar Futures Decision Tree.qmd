@@ -1,0 +1,77 @@
+In six months, a construction company will need to have 10 tons of gravel. The company has three options for acquiring the needed gravel. 
+
+The company can buy the gravel at market price six months from now. Alternatively, the company can buy a futures contract for all 10 tons of gravel, based on current market prices. Finally, the company could buy a futures contract for 5 tons of gravel now and buy the remaining 5 tons of gravel in six months.
+
+The prices per option are as such:
+
+10 tons on a futures contract: USD 170.20 per ton + USD 110 fee
+
+5 tons on a futures contract: USD 170.20 per ton + USD 65 fee + 5 tons at future market prices
+
+All tons at future market prices: 10 tons at future market prices
+
+The company predict that future market prices per ton may range according to the following probabilities:
+
+```{r}
+#| echo: false
+data <- data.frame(
+  Price = c(156, 166, 174, 182, 192),
+  Probability = c(0.05, 0.25, 0.35, 0.20, 0.15)
+)
+
+t <- data
+t$Price <- paste("USD", t$Price)
+t$Probability <- paste0(t$Probability * 100, "%")
+
+print(t)
+```
+
+Which option should the company choose? We'll examine the expected monetary value per option.
+
+```{r}
+#| echo: false
+futures_cost_per_ton <- 170.2
+ten_ton_futures_fee <- 110
+five_ton_futures_fee <- 65
+
+# Expected future price per ton as a weighted average of probabilities and prices.
+exp_future_price_per_ton <- (156 * .05) +(166 * .25) + (174 * .35) + (182 * .20) + (192 * .15)
+
+# The price per ton at current market prices for ten tons plus the transaction fee.
+ten_now <- (futures_cost_per_ton * 10) + ten_ton_futures_fee
+
+# The price per ton at current market prices for five tons, the expected future price of five tons, and the transaction fee.
+five_now <- (futures_cost_per_ton * 5) + (exp_future_price_per_ton * 5) + five_ton_futures_fee
+
+# The expected future price of ten tons.
+ten_future <- (exp_future_price_per_ton * 10)
+
+decision <- data.frame(
+    "Option" = c("10-ton Futures Contract", "5-ton Futures Contract", "All at Future Market Price"),
+    "Expected_Cost" = c(paste0("USD ",ten_now), paste0("USD ",five_now), paste0("USD ",ten_future))
+); decision
+```
+
+If the company is confident in its predictions, the cheapest option would be to purchase all 10 tons of gravel in six months at market prices. 
+
+Let's visualize the decision tree using Mermaid. Note that you will need to render this document using RStudio or a similar program to see this output:
+
+```{mermaid}
+graph LR 
+
+A[ ] -->|Buy 10 Futures Contracts Now| B( EMV: $1812 )
+A[ ] -->|Buy 5 Futures Contracts Now and 5 Tons in 6 Months| C(( Market Prices per Pound in 6 Months ))
+C -->|$0.078, p = .05| D( $1696 )
+C -->|$0.083, p = .25| E( $1746 )
+C -->|$0.087, p = .35| F( $1786 )
+C -->|$0.091, p = .20| G( $1826 )
+C -->|$0.096, p = .15| H( $1876 )
+D & E & F & G & H --> I( EMV = $1793 )
+A[ ] -->|Buy 10 Tons in 6 Months| J(( Market Prices per Pound in 6 Months ))
+J -->|$0.078, p = .05| K( $1560 )
+J -->|$0.083, p = .25| L( $1660 )
+J -->|$0.087, p = .35| M( $1740 )
+J -->|$0.091, p = .20| N( $1820 )
+J -->|$0.096, p = .15| O( $1920 )
+K & L & M & N & O --> P( EMV = $1754 )
+```

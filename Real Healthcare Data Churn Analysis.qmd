@@ -1,0 +1,555 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This project was conducted on behalf of a charitable clinic and was developed with a small team. The team analyzed a large, messy dataset of anonymous patient information to find the drivers behind patient churn - generally defined as patients failing to utilize the clinic's healthcare services without suitable explanation. The results were presented to the clinic's senior leadership and are being used to inform the clinic's strategy and operations.
+
+Below, libraries are loaded and the script is prepared.
+
+```{r message=FALSE, warning=FALSE}
+options(scipen=999)
+options(warn=-1)
+rm(list=ls())
+
+set.seed(100)
+library(MASS)
+library(tidyverse)
+library(caret)
+library(lubridate)
+library(car)
+library(naivebayes)
+```
+
+As the data used for this project references real people, no data is provided along with this script, which serves purely as a technical reference. The CSV files below have not been uploaded to avoid revealing any personal data. 
+
+As a consequence, the results and visualizations cannot be loaded. However, all the code is maintained, and the conclusions and insights can be found below. I am happy to talk about any aspect of this project in further detail.
+
+The provided data files were collected into a folder and loaded.
+
+```{r message=FALSE, warning=FALSE}
+reference <- ymd("2025/09/01")
+
+enc <- read_csv('Data/encounters.csv')
+no_show <- read_csv('Data/noshow.csv')
+people <- read_csv('Data/people.csv')
+enroll <- read_csv('Data/enrollment.csv')
+diagnosis <- read_csv('Data/diagnosis.csv')
+residence <- read_csv('Data/residence.csv')
+```
+
+mrn_pseudo refers to a unique identifier per patient. Some patients were recorded twice in the enrollment dataset, so we selected the latest status per patient to avoid double-counting predictors.
+
+```{r}
+enroll <- enroll %>% 
+    group_by(mrn_pseudo) %>% 
+    arrange(desc(enr_start), .by_group = TRUE) %>% 
+    slice(1) %>% 
+    ungroup()
+```
+
+We also eliminated duplicates in the general patient dataset.
+
+```{r}
+p_key <- people %>% 
+    dplyr::select(mrn_pseudo) %>% 
+    unique()
+```
+
+Our first join connects the enrollment dataset - containing insurance information - to the encounters dataset, which records patient appointments and other interactions with the clinic. Both datasets were joined using the unique mrn_pseudo identifier. We also labeled patients as churned or not.
+
+We defined churned patients as those who meet the following conditions:
+
+1. There exists a period of a year or more between encounters or since the patient's last encounter. We added an additional row to every patient's recorded encounters simulating the reference date to calculate the since_last column, which programmatically determined this criteria.
+
+2. The patient did not indicate enrollment in Medicaid, private insurance, or other life change which would make them ineligible to receive the clinic's healthcare services.
+
+```{r}
+enc_enr <- left_join(enc, enroll, by = "mrn_pseudo") %>% 
+    mutate(enc_date = ymd(enc_date)) %>% 
+    arrange(mrn_pseudo) %>% 
+    group_by(mrn_pseudo) %>% 
+    group_modify(~ add_row(.x, enc_date = reference)) %>% 
+    mutate(since_last = case_when(mrn_pseudo != lag(mrn_pseudo) ~ 0 * (enc_date - lag(enc_date)),
+                                  enc_date - lag(enc_date) < 0 ~ 0 * (enc_date - lag(enc_date)),
+                                  T ~ enc_date - lag(enc_date)),
+           churned = case_when(since_last >= 365 & enr_status != "Disenrolled" ~ 1,
+                               T ~ 0)) %>% 
+    group_by(mrn_pseudo) %>%
+    summarize(churned = sum(churned)) %>% 
+    mutate(churned = case_when(churned > 1 ~ 1,
+                               T ~ churned)) %>% 
+    ungroup()
+```
+
+We join our churned classifier to the unique patients dataset to construct our response variable.
+
+```{r}
+churn <- 
+    left_join(p_key, enc_enr, by = "mrn_pseudo") %>%
+    mutate(churned = case_when(is.na(churned) == T ~ 0,
+                              T ~ churned))
+```
+
+Our first predictor variable measures the number of no-shows per patient, which refers to a patient making an appointment, then failing to attend the appointment without prior cancellation. We classified patients into three categories:
+
+1. No no-shows
+2. One no-show
+3. More than one (many) no-shows
+
+The number of patients with more than one no-show was small enough to justify this factoring.
+
+```{r}
+no_show_counts <- no_show %>%
+    group_by(mrn_pseudo) %>%
+    summarise(no_show_count = n()) %>% 
+    mutate(no_show_count = as.factor(case_when(no_show_count == 1 ~ "One no_show",
+                                               no_show_count > 1 ~ "More than one no_show"))) %>%  
+    ungroup()
+```
+
+We factored the employment dataset into just two categories - Employed and Unemployed. Since this data was self-reported, we were skeptical of the informational value between, for example, Unemployed and Not in Workforce.
+
+```{r}
+unemployed <- people %>%
+    distinct(.keep_all = T) %>% 
+    mutate(
+        Employment = str_replace_all(Employment, "\\]", ")"),
+        unemployed = case_when(
+            Employment %in% c("Employed", "Self Employed", "Seasonal", "employed", "Contract") ~ 0,
+            Employment %in% c("Unemployed (Actively looking for work)", "Not in Workforce (Choosing not to work)", "Retired") ~ 1,
+            TRUE ~ 0
+        ),
+        employment_status = factor(unemployed,
+                                   levels = c(0, 1),
+                                   labels = c("Employed", "Unemployed"))) %>% 
+    ungroup() %>% 
+    dplyr::select(mrn_pseudo, unemployed)
+```
+
+We take the age_range variable from the people dataset and factored it into two categories; Elderly, containing patients of 65 years of age, and not elderly. 
+
+Patients were originally classified into buckets of different sizes, making comparisons difficult. We decided that the original classifier of 65+ was useful, but that the younger ranges were best combined due to the inconsistency.
+
+```{r}
+ages <- people %>%
+    dplyr::select(mrn_pseudo, age_range) %>% 
+    mutate(age_range = case_when(
+        age_range == "65+" ~ "Elderly",
+        TRUE ~ "Not elderly"
+    )) %>%
+    mutate(age_range = factor(age_range,
+                              levels = c("Not elderly", "Elderly"))) 
+```
+
+We condensed our locality feature into categories for local, representing counties containing or surrounding the clinic, or not local, representing further locations. We were primarily measuring ease of transportation to the clinic rather than any information specific to each county.
+
+The county names have been removed from the below code to protect the clinic's anonymity.
+
+```{r}
+new_residence_vars <- c("locations")
+
+res <- residence %>%
+    group_by(mrn_pseudo) %>% 
+    arrange(desc(r_start), .by_group = TRUE) %>% 
+    slice(1) %>% 
+    ungroup() %>% 
+    mutate(
+        is_local_county = case_when(
+            r_county %in% new_residence_vars ~ 1,
+            !r_county %in% new_residence_vars ~ 0,
+            is.na(r_county) ~ 0,
+            TRUE ~ 0)) %>%
+    dplyr::select(mrn_pseudo, is_local_county)
+```
+
+We select the most prevalent chronic conditions from the diagnosis dataset.
+
+Unfortunately, depression and anxiety were treated as one category in the original dataset, but we still used it as a general predictor.
+
+```{r}
+chronic_conditions <- diagnosis %>%
+    mutate(
+        condition = as.factor(case_when(
+            dia_dxgroup == 'Pre-diabetes' ~ 'Pre-diabetes',
+            dia_dxgroup == 'Diabetes' ~ 'Diabetes',
+            dia_dxgroup == 'Chronic Pain' ~ 'ChronicPain', 
+            dia_dxgroup == 'Hypertension' ~ 'Hypertension',
+            dia_dxgroup == 'Musculoskeletal' ~ 'Musculoskeletal',
+            dia_dxgroup == 'Asthma/COPD' ~ 'Asthma',
+            T ~ 'other'
+        )
+        )) %>%
+    filter(condition != "other") %>% 
+    dplyr::select(mrn_pseudo, condition) %>% 
+    distinct(mrn_pseudo, condition) %>% 
+    mutate(value = 1) %>% 
+    pivot_wider(
+        names_from = condition,
+        values_from = value,
+        values_fill = 0
+    )
+
+diag <- diagnosis %>% 
+    mutate(Depressed = if_else(dia_dxgroup == "Depression / Anxiety", 1, 0)) %>% 
+    dplyr::select(mrn_pseudo, Depressed) %>% 
+    group_by(mrn_pseudo) %>% 
+    arrange(desc(Depressed), .by_group = TRUE) %>% 
+    slice(1) %>% 
+    ungroup()
+```
+
+We also created features from the demographic-based people dataset:
+
+1. Recorded sex.
+2. Marriage Status, defined as Married, Single, and various categories signifying post-marriage.
+3. Housing status as Housed or Unhoused - the original dataset had an ambiguous category which signified housing of some kind, but muddied analysis due to possible overlap with other Housed categories, prompting us to factor them all into one category.
+4. Language as English, Spanish, Asian languages, and Other, based total frequency of each group.
+5. High frequency racial categories, with the rest condensed into Other.
+6. Education condensed into College, High School, and No High School, due to lack of frequency of patients at the post-graduate level.
+
+```{r}
+p_j <- people %>% 
+    dplyr::select(mrn_pseudo, Housing, Status, Gender, Language, Ethnicity, Education) %>% 
+    mutate(Gender = as.factor(case_when(Gender == 'F' ~ 'F',
+                                     Gender == 'M' ~ 'M',
+                                     T ~ NA)),
+        Status = as.factor(case_when(Status == 'Married' ~ 'Married',
+                                     Status == 'Single' ~ 'Single',
+                                     Status %in% c('Divorced','Legally Separated','Widowed') ~ 'Separated',
+                                     T ~ NA)),
+        Housing = as.factor(case_when(Housing == 'Homeless' ~ 'Unhoused',
+                                      T ~ 'Housed')),
+        Language = as.factor(case_when(
+            Language == "English" ~ "English",
+            Language == "Spanish" ~ "Spanish",
+            Language %in% c("Vietnamese", "Chinese", "Korean") ~ "Asian Languages",
+            TRUE ~ "Other")),
+        Ethnicity = as.factor(case_when(Ethnicity == 'White / Caucasian' ~ 'White',
+                                   Ethnicity == 'Black / African American' ~ 'Black',
+                                   Ethnicity == 'Hispanic / Latino' ~ 'Hispanic', 
+                                   Ethnicity == 'Asian' ~ 'Asian',
+                                   T ~ 'Other')),
+        Education = as.factor(case_when(Education == 'Less than high school' ~ 'No High School',
+                                        Education == 'High school diploma / GED' ~ 'High School',
+                                        Education %in% c('Some college', 'College degree', 'Associate Degree', 'Post college degree') ~ 'College',
+                                        T ~ NA)))
+p_j <- na.omit(p_j)
+```
+
+With all features created, we joined them into a single dataframe. 
+
+```{r}
+join <- list(churn, no_show_counts, unemployed, ages, p_j, diag, res, chronic_conditions)
+
+model_space <- Reduce(function(x, y) merge(x, y, by="mrn_pseudo", all=T), join)
+
+model_space <- model_space %>% 
+    mutate(no_show_count = case_when(is.na(no_show_count) == T ~ "No no_shows",
+                                     T ~ no_show_count),
+           Depressed = as.factor(case_when(is.na(Depressed) == T ~ 0,
+                                           T ~ Depressed)),
+           Musculoskeletal = as.factor(case_when(is.na(Musculoskeletal) == T ~ 0,
+                                                 T ~ Musculoskeletal)),
+           ChronicPain = as.factor(case_when(is.na(ChronicPain) == T ~ 0,
+                                             T ~ ChronicPain)),
+           Hypertension = as.factor(case_when(is.na(Hypertension) == T ~ 0,
+                                              T ~ Hypertension)),
+           Diabetes = as.factor(case_when(is.na(Diabetes) == T ~ 0,
+                                          T ~ Diabetes)),
+           Asthma = as.factor(case_when(is.na(Asthma) == T ~ 0,
+                                        T ~ Asthma)))
+
+model_space <- model_space %>% 
+    filter(is.na(churned) == FALSE) %>% 
+    mutate(
+        churned = case_match(churned, 0 ~ 'NotChurned', 1 ~ 'Churned'),
+        churned = factor(churned, levels = c('NotChurned','Churned')),
+        unemployed = as.factor(unemployed),
+        no_show_count = as.factor(no_show_count),
+        is_local_county = as.factor(is_local_county),
+        no_show_count = as.factor(no_show_count)
+    ) %>% 
+    dplyr::select(-mrn_pseudo)
+```
+
+We chose to remove NA values from the dataset due to low frequency. We explicitly labeled the reference level. 
+
+```{r}
+model_space <- na.omit(model_space)
+
+model_space$churned <- relevel(as.factor(model_space$churned), ref = "NotChurned")
+```
+
+Using EDA, we found that the set of patients with >1 no-shows has much greater variation and is much smaller than the set of patients with 0-1 no-shows. We decided to split our dataset along these lines, as our focus was on the drivers of churn for each population, which we didn't want to be obscured by the no-show outliers. 
+
+```{r}
+model_space_few_ns <- model_space %>% 
+    filter(no_show_count %in% c("No no_shows", "One no_show")) %>% 
+    droplevels() %>% 
+    na.omit()
+
+model_space_many_ns <- model_space %>% 
+    filter(no_show_count == "More than one no_show") %>% 
+    dplyr::select(-no_show_count) %>% 
+    droplevels()
+```
+
+As a baseline comparison, we created a Bernoulli Naive Bayes model with Laplace smoothing. 
+
+The Naive model turned out to have a high accuracy measure, but this was due to a relatively large number of false negatives. Since the coefficients of this model are not interpretable, it is furthermore not helpful for our overall task.
+
+```{r warning=FALSE}
+nb_index <- createDataPartition(model_space$churned, p = 0.8, list = F)
+nb_train <- model_space[nb_index, ]
+nb_test <- model_space[-nb_index, ]
+
+nb <- naive_bayes(data = nb_train, churned ~ ., laplace = 1)
+summary(nb)
+
+nb_pred <- predict(nb, nb_test, type = 'class')
+confusionMatrix(nb_pred, nb_test$churned, positive = 'Churned')
+```
+
+Our main model used logistic regression. 
+
+This model returned interesting and significant coefficients. We are relatively confident that the coefficients we ultimately chose to include in the model capture an optimal amount of variability, as testing stepwise models did not result in a significant change in AIC or coefficients. Furthermore, we interacted the Elderly and Hypertension predictors since that chronic condition is heavily correlated with age. We could interact more predictors with age as well with more iteration. Finally, we dropped Language from the final model due to extremely high VIF scores.
+
+Using this model, we found the following correlations:
+
+1. Patients who have been, but are no longer, married appear less likely to churn. This may be correlated with age and thus an interaction effect could be introduced.
+
+2. Patients with one no-show - all patients in this dataset have 0 or 1 no-shows - appear much more likely to churn. 
+
+3. Employed patients - who in this context earn a wage, but lack access to affordable healthcare - appear more likely to churn.
+
+4. Hispanic patients appear much more likely to churn than any other ethnicity.
+
+5. Patients with chronic conditions other than diabetes appear more likely to churn. Patients with diabetes appear less likely to churn.
+
+```{r warning=FALSE}
+#====Logistic Regression====
+few_ns_index <- createDataPartition(model_space_few_ns$churned, p = 0.8, list = FALSE)
+few_ns_train <- model_space_few_ns[few_ns_index, ]
+few_ns_test <- model_space_few_ns[-few_ns_index, ]
+
+lreg_few_ns <- train(churned ~ Status + is_local_county + no_show_count + unemployed + Housing + Ethnicity + Education + age_range * Hypertension + Depressed + Musculoskeletal + ChronicPain + Diabetes + Asthma, 
+                     data = few_ns_train, 
+                     family = "binomial", 
+                     method = 'glm', 
+                     metric = 'ROC')
+summary(lreg_few_ns)
+
+lreg_pred <- predict(lreg_few_ns, few_ns_test, type = 'prob')
+threshold <- 0.5
+lreg_churns <- as.factor(ifelse(lreg_pred$Churned > threshold, 'Churned', 'NotChurned'))
+confusionMatrix(lreg_churns, few_ns_test$churned, positive = 'Churned')
+```
+
+We attempted to replicate this model with our dataset of patients with > 1 no-shows. As this dataset is far smaller, the coefficients were highly unstable. Repeated trials of this model show that single patients in this population seem consistently less likely to churn - We can't draw any other conclusions about this population.
+
+Interestingly, Ethnicity had high VIF scores in this dataset rather than Language.
+
+```{r warning=FALSE}
+#====Logistic Regression====
+many_ns_index <- createDataPartition(model_space_many_ns$churned, p = 0.8, list = FALSE)
+many_ns_train <- model_space_many_ns[many_ns_index, ]
+many_ns_test <- model_space_many_ns[-many_ns_index, ]
+
+lreg_many_ns <- train(churned ~ . - Ethnicity, 
+                      data = many_ns_train, 
+                      family = "binomial",
+                      method = 'glm',
+                      trControl = many_ns_trctrl,
+                      metric = 'ROC')
+summary(lreg_many_ns)
+
+lreg_pred_many <- predict(lreg_many_ns, many_ns_test, type = 'prob')
+threshold = 0.5
+lreg_churns_many <- as.factor(ifelse(lreg_pred_many$Churned > threshold, "Churned", "NotChurned"))
+confusionMatrix(lreg_churns_many, many_ns_test$churned, positive = 'Churned')
+```
+For practice, we trained a K-Nearest Neighbors (KNN) model to attempt to predict churn. This model can't be used for inference.
+
+While technically highly accurate, this model resulted in many more false negatives than our logistic regression models. The KNN model found high accuracy with a K of 9 but was overly conservative, limiting its usefulness. This was true even when optimizing for recall (sensitivity) to minimize false negatives.
+
+```{r warning=FALSE}
+#====Basic Cross-Validation====
+#====Feature Numerical Encoding====
+knn_index <- createDataPartition(model_space$churned, p = 0.8, list = F)
+knn_train <- model_space[knn_index,]
+knn_test <- model_space[-knn_index,]
+
+knn_train <- knn_train %>% 
+    mutate(
+        no_show_count = as.factor(case_when(no_show_count == "No no_shows" ~ 0,
+                                            T ~ 1)),
+        age_range = as.factor(case_when(age_range == "Elderly" ~ 1,
+                                        T ~ 0)),
+        Housing = as.factor(case_when(Housing == "Homeless" ~ 1,
+                                      T ~ 0)),
+        Status = as.factor(case_when(Status == "Married" ~ 0,
+                                     Status == "Single" ~ 1,
+                                     Status == "Separated" ~ 2)),
+        Gender = as.factor(case_when(Gender == "F" ~ 1,
+                                     T ~ 0)),
+        Language = as.factor(case_when(Language == "English" ~ 0,
+                                       Language == "Spanish" ~ 1,
+                                       Language == "Asian Languages" ~ 2,
+                                       T ~ 3)),
+        Ethnicity = as.factor(case_when(Ethnicity == "Black" ~ 1,
+                                   Ethnicity == "White" ~ 2, 
+                                   Ethnicity == "Asian" ~ 3,
+                                   Ethnicity == "Hispanic"~ 4,
+                                   T ~ 0)),
+        Education = as.factor(case_when(Education == "No High School" ~ 0,
+                                        Education == "High School" ~ 1,
+                                        Education == "College" ~ 2)) 
+    ) %>% 
+    na.omit()
+
+knn_test <- knn_test %>% 
+    mutate(
+        no_show_count = as.factor(case_when(no_show_count == "No no_shows" ~ 0,
+                                            T ~ 1)),
+        age_range = as.factor(case_when(age_range == "Elderly" ~ 1,
+                                        T ~ 0)),
+        Housing = as.factor(case_when(Housing == "Homeless" ~ 1,
+                                      T ~ 0)),
+        Status = as.factor(case_when(Status == "Married" ~ 0,
+                                     Status == "Single" ~ 1,
+                                     Status == "Separated" ~ 2)),
+        Gender = as.factor(case_when(Gender == "F" ~ 1,
+                                     T ~ 0)),
+        Language = as.factor(case_when(Language == "English" ~ 0,
+                                       Language == "Spanish" ~ 1,
+                                       Language == "Asian Languages" ~ 2,
+                                       T ~ 3)),
+        Ethnicity = as.factor(case_when(Ethnicity == "Black" ~ 1,
+                                   Ethnicity == "White" ~ 2, 
+                                   Ethnicity == "Asian" ~ 3,
+                                   Ethnicity == "Hispanic"~ 4,
+                                   T ~ 0)),
+        Education = as.factor(case_when(Education == "No High School" ~ 0,
+                                        Education == "High School" ~ 1,
+                                        Education == "College" ~ 2)) 
+    )  %>% 
+    na.omit(knn_prep_test)
+
+knn_trctrl <- trainControl(method = 'cv', number = 10, classProbs = T, summaryFunction = prSummary)
+
+knn <- train(churned ~ ., data = knn_train, method = 'knn', preProcess = c('center', 'scale'), trControl = knn_trctrl, metric = 'Recall')
+
+knn_pred <- predict(knn, knn_test)
+confusionMatrix(knn_pred, as.factor(knn_test$churned), positive = 'Churned')
+
+options(warn=0)
+```
+
+#Model Comparisons
+
+We list the most significant coefficients from our few no-shows logistic regression.
+
+```{r}
+ns_few_lr_coefs <- data.frame(coefficients(summary(lreg_few_ns))[c('EthnicityHispanic','age_rangeElderly','Diabetes1','unemployed1','StatusSingle','`EducationHigh School`'),c(1,4)]) %>% 
+    arrange(desc(abs(Estimate)), Pr...z..) %>% 
+    rename(Significance = Pr...z..) %>% 
+    rename(Estimated_Effect = Estimate)
+ns_few_lr_coefs
+```
+
+We list the found k-value from our KNN model.
+
+```{r}
+knn$bestTune
+```
+
+We list the sensitivity metric of each model, which was our preferred optimized metric.
+
+```{r message=FALSE, warning=FALSE}
+sens <- data.frame(
+    Model = c('Naive Bayes', 'Logistic Regression Few No-Shows', 'Logistic Regression Many No-Shows', 'KNN'),
+    Sensitivity = c(
+        confusionMatrix(nb_pred, nb_test$churned, positive = 'Churned')$byClass['Sensitivity'],
+        confusionMatrix(lreg_churns, few_ns_test$churned, positive = 'Churned')$byClass['Sensitivity'],
+        confusionMatrix(lreg_churns_many, many_ns_test$churned, positive = 'Churned')$byClass['Sensitivity'],
+        confusionMatrix(knn_pred, as.factor(knn_test$churned), positive = 'Churned')$byClass['Sensitivity']
+    ),
+    Accuracy = c(
+        confusionMatrix(nb_pred, nb_test$churned, positive = 'Churned')$overall['Accuracy'],
+        confusionMatrix(lreg_churns, few_ns_test$churned, positive = 'Churned')$overall['Accuracy'],
+        confusionMatrix(lreg_churns_many, many_ns_test$churned, positive = 'Churned')$overall['Accuracy'],
+        confusionMatrix(knn_pred, as.factor(knn_test$churned), positive = 'Churned')$overall['Accuracy']
+    )
+)
+sens
+```
+
+# Visualizations 
+
+We visualize the proportion of patients with varied marital statuses between churned and non-churned patients to highlight the increased rate churn among married patients with many no-shows.
+
+```{r}
+ggplot(model_space_many_ns, aes(churned, fill = Status)) +
+  geom_bar(position = 'fill') +
+  labs(
+    title = 'Proportion of Churned vs. Non-Churned Patients Compared by Marital Status',
+    subtitle = 'Patients with many no-shows',
+    y = 'Proportion of Patients by Marital Status' # New Y-axis title
+  ) +
+  scale_fill_discrete(
+    guide = guide_legend(reverse = TRUE) # Reverses the legend order
+  ) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank())
+```
+
+We visualize the predictive effect of other chronic conditions on churn vs the effect of diabetes on churn to highlight the surprising reverse effect.
+
+```{r}
+est <- data.frame(cond = c('Depressed1','Musculoskeletal1','Asthma1','ChronicPain1','Diabetes1','Hypertension1'),
+                  est = coef(summary(lreg_few_ns))[c('Depressed1','Musculoskeletal1','Asthma1','ChronicPain1','Diabetes1','Hypertension1'),1])
+
+minest <- min(est$est)
+maxest <- max(est$est)
+
+est$cond <- gsub('1','',est$cond)
+est$cond[est$cond == 'ChronicPain'] <- 'Chronic Pain'
+
+p <- coef(summary(lreg_few_ns))[c('Depressed1','Musculoskeletal1','Asthma1','ChronicPain1','Diabetes1','Hypertension1'),4]
+
+ggplot(est, aes(reorder(cond, desc(est)), est, fill = est)) +
+    geom_col() +
+    scale_fill_viridis_c(
+        option = 'viridis',
+        name = 'Estimated Effect'
+    ) +
+    scale_y_continuous(
+       limits = c(minest, maxest + 0.4),
+       expand = expansion(mult = 0),
+       name = 'Estimated Effect on Churn'
+    ) +
+    labs(
+        title = 'Estimated Effect of Chronic Condition Diagnoses on Churn',
+        subtitle = 'Patients with few no-shows',
+        x = 'Condition'
+    ) +
+    theme_minimal()
+```
+
+We visualize the proportion of churned to non-churned patients classified by Ethnicity to highlight the increased rate of churn among Hispanic patients.
+
+```{r}
+ggplot(model_space_few_ns, aes(churned, fill = Ethnicity)) +
+  geom_bar(position = 'fill') +
+  labs(
+    title = 'Proportion of Churned vs. Non-Churned Patients Compared by Ethnicity',
+    subtitle = 'Patients with few no-shows',
+    y = 'Proportion of Patients by Ethnicity' # New Y-axis title
+  ) +
+  scale_fill_discrete(
+    guide = guide_legend(reverse = TRUE) # Reverses the legend order
+  ) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank())
+options(warn=0)
+```
